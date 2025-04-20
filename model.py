@@ -2,7 +2,8 @@ import pandas as pd
 import numpy as np
 import optuna
 from sklearn.model_selection import train_test_split, StratifiedKFold
-from sklearn.metrics import (precision_recall_curve, f1_score, confusion_matrix,classification_report, roc_auc_score, roc_curve)
+from sklearn.metrics import (precision_recall_curve, f1_score, confusion_matrix,
+                             classification_report, roc_auc_score, roc_curve)
 from xgboost import XGBClassifier
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -10,13 +11,26 @@ import joblib
 import json
 import shap
 
-
+# === Load and modify data === #
 X = pd.read_csv("X.csv")
 y = pd.read_csv("y.csv").values.ravel()
 
+# 🎯 Boost feature preference by scaling
+feature_weights = {
+    'IsFlaggedBefore': 5.0,
+    'DeviceChange': 2.0,
+    'IsAmountUsualForUser': 2.5
+}
+
+for feature, weight in feature_weights.items():
+    if feature in X.columns:
+        X[feature] *= weight
+
+# === Split data === #
 X_train, X_temp, y_train, y_temp = train_test_split(X, y, test_size=0.3, stratify=y, random_state=42)
 X_val, X_test, y_val, y_test = train_test_split(X_temp, y_temp, test_size=0.5, stratify=y_temp, random_state=42)
 
+# === Optuna Objective === #
 def objective(trial):
     params = {
         'n_estimators': trial.suggest_int('n_estimators', 100, 500),
@@ -35,20 +49,21 @@ def objective(trial):
     f1_scores = []
 
     for train_idx, val_idx in cv.split(X_train, y_train):
-        X_tr, X_val = X_train.iloc[train_idx], X_train.iloc[val_idx]
-        y_tr, y_val = y_train[train_idx], y_train[val_idx]
+        X_tr, X_val_cv = X_train.iloc[train_idx], X_train.iloc[val_idx]
+        y_tr, y_val_cv = y_train[train_idx], y_train[val_idx]
 
         model = XGBClassifier(**params)
         model.fit(X_tr, y_tr)
-        y_probs = model.predict_proba(X_val)[:, 1]
+        y_probs = model.predict_proba(X_val_cv)[:, 1]
 
-        precision, recall, thresholds = precision_recall_curve(y_val, y_probs)
+        precision, recall, thresholds = precision_recall_curve(y_val_cv, y_probs)
         f1s = 2 * (precision * recall) / (precision + recall + 1e-6)
         best_f1 = np.max(f1s)
         f1_scores.append(best_f1)
 
     return np.mean(f1_scores)
 
+# === Run Optimization === #
 study = optuna.create_study(direction='maximize')
 study.optimize(objective, n_trials=80, show_progress_bar=True)
 
@@ -56,13 +71,14 @@ print(" Best Trial:", study.best_trial.number)
 print(" Best F1 Score:", study.best_value)
 print(" Best hyperparameters:", study.best_params)
 
+# === Train Final Model === #
 best_params = study.best_params
-best_params.update({ 'eval_metric': 'logloss', 'random_state': 42})
+best_params.update({'eval_metric': 'logloss', 'random_state': 42})
 
 model = XGBClassifier(**best_params)
 model.fit(X_train, y_train)
 
-
+# === Predict & Tune Threshold === #
 y_probs = model.predict_proba(X_test)[:, 1]
 
 precision, recall, thresholds = precision_recall_curve(y_test, y_probs)
@@ -70,6 +86,7 @@ f1s = 2 * (precision * recall) / (precision + recall + 1e-6)
 best_threshold = thresholds[np.argmax(f1s)]
 print(f"🔧 Best Threshold: {best_threshold:.4f}")
 
+# === Evaluation Function === #
 def evaluate(y_true, y_probs, threshold):
     y_pred = (y_probs >= threshold).astype(int)
 
@@ -99,15 +116,16 @@ def evaluate(y_true, y_probs, threshold):
 
 evaluate(y_test, y_probs, threshold=best_threshold)
 
+# === SHAP for Interpretability === #
 explainer = shap.TreeExplainer(model)
 shap_values = explainer.shap_values(X_test)
-
 shap.summary_plot(shap_values, X_test)
 
+# === Save Everything === #
 joblib.dump(model, "xgboost_optuna_model.pkl")
 with open("best_threshold.txt", "w") as f:
     f.write(str(best_threshold))
 with open("best_params.json", "w") as f:
     json.dump(study.best_params, f, indent=4)
 
-
+print("✅ Model, threshold, and best parameters saved.")
