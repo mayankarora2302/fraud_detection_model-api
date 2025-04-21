@@ -1,19 +1,19 @@
 from fastapi import FastAPI
 from pydantic import BaseModel
 import joblib
-import xgboost as xgb
 import pandas as pd
-import numpy as np
 
 app = FastAPI()
 
-model = joblib.load("xgboost_optuna_model.pkl")
-
+# Load model, encoders, threshold, and feature order
+model = joblib.load("xgb_fraud_model.pkl")
 label_encoders = joblib.load("label_encoders.pkl")
+feature_columns = joblib.load("feature_columns.pkl")  # exact training column order
 
 with open("best_threshold.txt", "r") as f:
     best_threshold = float(f.read().strip())
 
+# Define input schema
 class TransactionInput(BaseModel):
     Amount: float
     SenderLocation: str
@@ -27,23 +27,29 @@ class TransactionInput(BaseModel):
 
 @app.post("/predict")
 def predict(transaction: TransactionInput):
-    
     input_data = transaction.dict()
-
     df = pd.DataFrame([input_data])
 
+    # Encode categorical columns with label encoders
     for col, le in label_encoders.items():
         if col in df.columns:
             try:
                 df[col] = le.transform(df[col])
-            except Exception as e:
+            except ValueError:
                 return {"error": f"Invalid value for '{col}': {df[col].values[0]}"}
 
-    
+    # Ensure all columns match training time
+    for col in feature_columns:
+        if col not in df.columns:
+            df[col] = 0  # Add missing columns with default value
+    df = df[feature_columns]  # enforce column order
+
+    # Final numeric safety net
     df = df.apply(pd.to_numeric, errors='coerce')
 
+    # Predict probability
     try:
-        prob = model.predict(df)[0] 
+        prob = model.predict_proba(df)[0][1]  # get probability for fraud class
     except Exception as e:
         return {"error": f"Error during prediction: {str(e)}"}
 
